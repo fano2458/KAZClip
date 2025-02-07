@@ -34,6 +34,8 @@ def compute_image_embeddings(image_folder, model_path, output_path, device="cpu"
     torch.save(image_embeddings, os.path.join(output_path, "precomputed_image_embeddings.pt"))
     torch.save(image_paths, os.path.join(output_path, "image_paths.pt"))
 
+    return image_embeddings, image_paths
+
 
 if __name__ == "__main__":
     device = "cuda" if torch.cuda.is_available() else "cpu"

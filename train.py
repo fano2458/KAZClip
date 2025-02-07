@@ -1,5 +1,5 @@
 import torch
-from torch.utils.data import Dataset, DataLoader
+from torch.utils.data import Dataset, DataLoader, random_split
 from src.model import KazClip
 from src.visual_encoder import VisualProcessor
 from src.text_encoder import TextTokenizer
@@ -11,6 +11,13 @@ from torch.optim.lr_scheduler import CosineAnnealingLR
 import wandb
 import heapq
 import os
+os.environ["TOKENIZERS_PARALLELISM"] = "false"
+
+import warnings
+warnings.simplefilter("ignore", FutureWarning)
+
+from compute_image_embeddings import compute_image_embeddings
+from predict import predict_top5
 
 
 class ImageCaptionDataset(Dataset):
@@ -59,20 +66,21 @@ def train_model():
     print(f"Non-trainable parameters: {total_params - trainable_params}")
 
     valid_dataset = ImageCaptionDataset("data/val2017.json")
+    # train_dataset, valid_dataset = random_split(valid_dataset, [len(valid_dataset)-5000, 5000])
     train_dataset = ImageCaptionDataset("data/train2017.json")
 
     batch_size = 128
     valid_dataloader = DataLoader(valid_dataset, batch_size=batch_size, shuffle=False, num_workers=8, pin_memory=True)
     train_dataloader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True, num_workers=8, pin_memory=True)
 
-    optimizer = torch.optim.Adam(model.parameters(), lr=1e-4)
+    optimizer = torch.optim.SGD(model.parameters(), lr=1e-4, momentum=0.9)
     epochs = 50
     scheduler = CosineAnnealingLR(optimizer, T_max=epochs)
     
     scaler = torch.cuda.amp.GradScaler()
     wandb.init(project="kaz-clip")
     best_val_loss = float('inf')
-    patience = 4
+    patience = 3
     no_improvement_count = 0
     top_checkpoints = []
 
@@ -121,8 +129,8 @@ def train_model():
             torch.save(model.state_dict(), best_model_path)
             print(f"Model saved at epoch {epoch+1} with val loss: {best_val_loss:.4f}")
             no_improvement_count = 0
-            # Maintain top 3 model.state_dicts
-            heapq.heappush(top_checkpoints, (mean_val_loss, best_model_path))
+            
+            heapq.heappush(top_checkpoints, (-mean_val_loss, best_model_path))
             if len(top_checkpoints) > 3:
                 _, old_checkpoint = heapq.heappop(top_checkpoints)
                 os.remove(old_checkpoint)
@@ -131,6 +139,17 @@ def train_model():
             if no_improvement_count >= patience:
                 print(f"Early stopping at epoch {epoch+1}")
                 break
+
+        # check model outputs every 5 epochs
+        if (epoch) % 5 == 0:
+            caption = "кітапті оқитын бала"
+            image_embeddings, image_paths = compute_image_embeddings("data/val2017", best_model_path, ".", device)
+            top5_paths = predict_top5(model, caption, image_embeddings, image_paths, device)
+            print("-------------------")
+            print(f"Top 5 matches for caption '{caption}':")
+            for path in top5_paths:
+                print(path)
+            print("-------------------")
 
 
 if __name__ == "__main__":

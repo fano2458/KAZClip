@@ -5,7 +5,7 @@ from transformers import AutoModelForImageClassification, AutoImageProcessor
 
 class VisualProcessor:
     def __init__(self):
-        self.processor = AutoImageProcessor.from_pretrained("microsoft/swinv2-tiny-patch4-window8-256")
+        self.processor = AutoImageProcessor.from_pretrained("microsoft/swinv2-tiny-patch4-window8-256", use_fast=True)
     
     def __call__(self, x):
         return self.processor(x, return_tensors="pt")["pixel_values"]

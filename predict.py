@@ -8,6 +8,7 @@ def predict_top5(model, caption, image_embeddings, image_paths, device="cpu"):
     tokenizer = TextTokenizer()
     tokens = tokenizer(caption)
     tokens = {k: v.to(device) for k, v in tokens.items()}
+    image_embeddings = image_embeddings.to(device)
 
     with torch.no_grad():
         _, text_features = model(None, tokens)  
