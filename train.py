@@ -1,5 +1,5 @@
 import torch
-from torch.utils.data import Dataset, DataLoader, random_split
+from torch.utils.data import Dataset, DataLoader
 from src.model import KazClip
 from src.visual_encoder import VisualProcessor
 from src.text_encoder import TextTokenizer
@@ -56,7 +56,7 @@ class ImageCaptionDataset(Dataset):
 def train_model():
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     model = KazClip().to(device)
-    model.visual_encoder.encoder.requires_grad_(False)
+    model.visual_encoder.encoder.requires_grad_(True)
     model.text_encoder.encoder.requires_grad_(False)
 
     total_params = sum(p.numel() for p in model.parameters())
@@ -66,10 +66,9 @@ def train_model():
     print(f"Non-trainable parameters: {total_params - trainable_params}")
 
     valid_dataset = ImageCaptionDataset("data/val2017.json")
-    # train_dataset, valid_dataset = random_split(valid_dataset, [len(valid_dataset)-5000, 5000])
     train_dataset = ImageCaptionDataset("data/train2017.json")
 
-    batch_size = 128
+    batch_size = 32
     valid_dataloader = DataLoader(valid_dataset, batch_size=batch_size, shuffle=False, num_workers=8, pin_memory=True)
     train_dataloader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True, num_workers=8, pin_memory=True)
 
@@ -141,7 +140,6 @@ def train_model():
                 break
 
         # check model outputs every epoch
-        # if (epoch) % 2 == 0:
         caption = ["кітапті оқитын бала", "мысықпен жүріп жатқан адам", "көшеде келе жатқан адам"]
         
         image_embeddings, image_paths = compute_image_embeddings("data/val2017", best_model_path, ".", device)
