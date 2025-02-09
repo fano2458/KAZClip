@@ -3,10 +3,13 @@
 ## Overview
 KAZClip is an image-text matching model inspired by OpenAI's CLIP, tailored for Kazakh-language data. It uses transformer-based encoders for both text and images, then aligns these representations through a shared latent space. This model has been trained using [this dataset](http://images.cocodataset.org/zips/train2017.zip) which has been translated to Kazakh Language.
 
+The goal of this repository is to provide a simple example of how to train a CLIP-like model on a custom dataset. The model is trained on a small dataset and is not intended to be a state-of-the-art model. The code is intended to be easy to understand and modify.
+
+The model is able to retrieve images based on text queries in Kazakh language. Some examples are provided below.
+
 ## Examples
-| Caption                   | Caption                    |
-| ------------------------- | -------------------------- |
 | Kөшеде келе жатқан адам.  | Kітапті оқитын бала.       |
+| ------------------------- | -------------------------- |
 | <img src="examples/000000021839.jpg" width="300" height="300"/> | <img src="examples/000000563281.jpg" width="300" height="300"/> |
 
 ## Requirements
