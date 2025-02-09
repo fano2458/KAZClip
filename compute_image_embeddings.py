@@ -41,7 +41,7 @@ if __name__ == "__main__":
     device = "cuda" if torch.cuda.is_available() else "cpu"
     compute_image_embeddings(
         image_folder="data/val2017",
-        model_path="best_model.pt",
+        model_path=r"fine-tune, base, 3e-4/model_epoch_7_2.461.pt",
         output_path=".",
         device=device
     )

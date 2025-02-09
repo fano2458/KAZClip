@@ -73,7 +73,7 @@ def train_model():
     valid_dataloader = DataLoader(valid_dataset, batch_size=batch_size, shuffle=False, num_workers=8, pin_memory=True)
     train_dataloader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True, num_workers=8, pin_memory=True)
 
-    optimizer = torch.optim.SGD(model.parameters(), lr=1e-4, momentum=0.9)
+    optimizer = torch.optim.AdamW(model.parameters(), lr=3e-5, weight_decay=0)
     epochs = 50
     scheduler = CosineAnnealingLR(optimizer, T_max=epochs)
     
@@ -140,16 +140,19 @@ def train_model():
                 print(f"Early stopping at epoch {epoch+1}")
                 break
 
-        # check model outputs every 5 epochs
-        if (epoch) % 5 == 0:
-            caption = "кітапті оқитын бала"
-            image_embeddings, image_paths = compute_image_embeddings("data/val2017", best_model_path, ".", device)
-            top5_paths = predict_top5(model, caption, image_embeddings, image_paths, device)
+        # check model outputs every epoch
+        # if (epoch) % 2 == 0:
+        caption = ["кітапті оқитын бала", "мысықпен жүріп жатқан адам", "көшеде келе жатқан адам"]
+        
+        image_embeddings, image_paths = compute_image_embeddings("data/val2017", best_model_path, ".", device)
+        for i in range(len(caption)):
+            top5_paths = predict_top5(model, caption[i], image_embeddings, image_paths, device)
             print("-------------------")
-            print(f"Top 5 matches for caption '{caption}':")
+            print(f"Top 5 matches for caption '{caption[i]}':")
             for path in top5_paths:
                 print(path)
-            print("-------------------")
+            print("#"*10)
+        print("-------------------")
 
 
 if __name__ == "__main__":

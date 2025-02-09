@@ -26,7 +26,7 @@ if __name__ == "__main__":
     image_paths = torch.load("image_paths.pt")
 
     model = KazClip()
-    model.load_state_dict(torch.load("best_model.pt", map_location=device))
+    model.load_state_dict(torch.load(r"fine-tune, base, 3e-4/model_epoch_7_2.461.pt", map_location=device))
     model.eval().to(device)
 
     captions = ["көшеде келе жатқан адам", 
