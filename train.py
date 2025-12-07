@@ -9,7 +9,6 @@ import pandas as pd
 import numpy as np
 from PIL import Image
 from tqdm import tqdm
-from torch.optim.lr_scheduler import CosineAnnealingLR
 import wandb
 import os
 import argparse
@@ -24,58 +23,114 @@ warnings.simplefilter("ignore", FutureWarning)
 
 
 class KazakhImageCaptionDataset(Dataset):
-    """Optimized dataset for Kazakh image-caption pairs."""
+    """Dataset for Kazakh image-caption pairs with COCO/CSV support."""
+
+    CAPTION_KEYS = ("caption", "caption_kk", "caption_kz")
     
-    def __init__(self, csv_path: str = None, json_path: str = None, image_dir: str = None, 
-                 split: str = "train", test_size: float = 0.1, 
-                 random_state: int = 42, visual_architecture: str = 'resnet50'):
+    def __init__(self, csv_path: str = None, json_path: str = None, image_dir: str = None,
+                 split: str = "train", test_size: float = 0.1,
+                 random_state: int = 42, visual_architecture: str = 'deit_s_16',
+                 text_model_name: str = 'xlm-roberta-base'):
         self.visual_processor = VisualProcessor(visual_architecture)
-        self.text_tokenizer = TextTokenizer()
+        try:
+            self.text_tokenizer = TextTokenizer(model_name=text_model_name)
+        except TypeError:
+            # Backward compatibility if TextTokenizer does not accept model_name
+            self.text_tokenizer = TextTokenizer()
         self.image_dir = image_dir
-        
-        # Handle both CSV and JSON (COCO) formats
+        self.data: List[Tuple[str, str]] = []
+
         if json_path is not None:
-            # Load COCO format data
-            with open(json_path, 'r', encoding='utf-8') as f:
-                coco_data = json.load(f)
-            
-            # Create image_id to filename mapping
-            image_id_to_filename = {img['id']: img['file_name'] for img in coco_data['images']}
-            
-            # Extract image-caption pairs
-            self.data = []
-            for annotation in coco_data['annotations']:
-                image_id = annotation['image_id']
-                caption = annotation['caption']
-                if image_id in image_id_to_filename:
-                    filename = image_id_to_filename[image_id]
-                    self.data.append((filename, caption))
-            
-            print(f"📊 Loaded {len(self.data)} image-caption pairs from COCO format")
-            
+            self._load_from_coco_json(json_path)
+        elif csv_path is not None:
+            self._load_from_csv(csv_path, split, test_size, random_state)
         else:
-            # Load CSV format data (original implementation)
-            df = pd.read_csv(csv_path)
-            
-            # Group by image to ensure no data leakage
-            image_groups = df.groupby('image')['caption'].apply(list).reset_index()
-            
-            train_images, val_images = train_test_split(
-                image_groups, test_size=test_size, random_state=random_state
+            raise ValueError("Either json_path or csv_path must be provided.")
+
+        if not self.data:
+            raise ValueError(
+                f"No valid image-caption pairs were loaded from {json_path or csv_path}."
             )
+    
+    def _load_from_coco_json(self, json_path: str):
+        if not self.image_dir:
+            raise ValueError("image_dir must be provided when loading from a COCO-style JSON file.")
+
+        with open(json_path, 'r', encoding='utf-8') as f:
+            coco_data = json.load(f)
+
+        images = coco_data.get('images') or []
+        annotations = coco_data.get('annotations') or []
+        image_id_to_filename = {
+            img['id']: img.get('file_name')
+            for img in images
+            if 'id' in img and img.get('file_name')
+        }
+
+        skipped_missing_caption = 0
+        skipped_missing_image = 0
+
+        for annotation in annotations:
+            caption = self._extract_caption(annotation)
+            if not caption:
+                skipped_missing_caption += 1
+                continue
+
+            image_id = annotation.get('image_id')
+            if image_id is None:
+                skipped_missing_image += 1
+                continue
+
+            filename = image_id_to_filename.get(image_id)
+            if not filename:
+                filename = self._format_coco_filename(image_id)
+                if not filename:
+                    skipped_missing_image += 1
+                    continue
             
-            if split == "train":
-                selected_data = train_images
-            else:
-                selected_data = val_images
-                
-            # Expand back to image-caption pairs
-            self.data = []
-            for _, row in selected_data.iterrows():
-                image_name = row['image']
-                captions = row['caption']
-                for caption in captions:
-                    self.data.append((image_name, caption))
+            self.data.append((filename, caption))
+
+        print(f"📊 Loaded {len(self.data)} image-caption pairs from {os.path.basename(json_path)}")
+        if skipped_missing_caption:
+            print(f"⚠️ Skipped {skipped_missing_caption} annotations without usable captions")
+        if skipped_missing_image:
+            print(f"⚠️ Missing filename metadata for {skipped_missing_image} annotations")
+
+    def _load_from_csv(self, csv_path: str, split: str, test_size: float, random_state: int):
+        # Load CSV format data (original implementation)
+        df = pd.read_csv(csv_path)
+        
+        # Group by image to ensure no data leakage
+        image_groups = df.groupby('image')['caption'].apply(list).reset_index()
+        
+        train_images, val_images = train_test_split(
+            image_groups, test_size=test_size, random_state=random_state
+        )
+        
+        selected_data = train_images if split == "train" else val_images
+        
+        for _, row in selected_data.iterrows():
+            image_name = row['image']
+            captions = row['caption']
+            for caption in captions:
+                self.data.append((image_name, caption))
+
+    @classmethod
+    def _extract_caption(cls, annotation: Dict) -> str:
+        for key in cls.CAPTION_KEYS:
+            value = annotation.get(key)
+            if isinstance(value, str):
+                stripped = value.strip()
+                if stripped:
+                    return stripped
+        return None
+
+    @staticmethod
+    def _format_coco_filename(image_id) -> str:
+        try:
+            return f"{int(image_id):012d}.jpg"
+        except (TypeError, ValueError):
+            return None
     
     def __len__(self) -> int:
         return len(self.data)
@@ -197,12 +252,14 @@ def evaluate_model(model: KazClip, dataloader: DataLoader, device: torch.device)
     total_loss = 0.0
     num_batches = 0
     
+    amp_enabled = device.type == 'cuda'
+
     with torch.no_grad():
         for batch_images, batch_text in tqdm(dataloader, desc="Evaluating"):
             batch_images = batch_images.to(device)
             batch_text = {k: v.to(device) for k, v in batch_text.items()}
             
-            with torch.cuda.amp.autocast():
+            with torch.cuda.amp.autocast(enabled=amp_enabled):
                 visual_features, text_features = model(batch_images, batch_text)
                 loss = model.compute_loss(visual_features, text_features)
             
@@ -301,7 +358,6 @@ def load_existing_checkpoints(visual_architecture: str, max_checkpoints: int = 3
             except Exception as e:
                 print(f"⚠️ Unexpected error removing {os.path.basename(excess_checkpoint)}: {e}")
         checkpoints_with_scores = checkpoints_with_scores[:max_checkpoints]
-        checkpoints_with_scores = checkpoints_with_scores[:max_checkpoints]
     
     return checkpoints_with_scores
 
@@ -398,7 +454,7 @@ def update_training_graphs(history: Dict, checkpoint_dir: str, architecture: str
     print(f"📊 Updated training graphs: {plot_path}")
 
 
-def train_model(visual_architecture: str = 'resnet50', **kwargs):
+def train_model(visual_architecture: str = 'deit_s_16', **kwargs):
     """Optimized training function for Kazakh CLIP model."""
     
     config = {
@@ -416,10 +472,13 @@ def train_model(visual_architecture: str = 'resnet50', **kwargs):
         'visual_architecture': visual_architecture,
         'pretrained': True,
         'freeze_encoders': True,  # Default to freezing encoders for faster training
-        'train_json_path': 'data/captions_train2017_kaz.json',
-        'val_json_path': 'data/captions_val2017_kazakh.json',
+        'train_last_visual_layers': 2,
+        'train_last_text_layers': 0,
+        'train_json_path': 'data/captions_kk_train2017.json',
+        'val_json_path': 'data/captions_kk_val2017.json',
         'train_image_dir': 'data/train2017',
-        'val_image_dir': 'data/val2017'
+        'val_image_dir': 'data/val2017',
+        'text_encoder_name': 'xlm-roberta-base'
     }
     
     # Update config with any provided kwargs
@@ -435,13 +494,21 @@ def train_model(visual_architecture: str = 'resnet50', **kwargs):
     
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Using device: {device}")
+    amp_enabled = device.type == 'cuda'
     
     # Initialize model
-    model = KazClip(
-        projection_dim=config['projection_dim'],
-        visual_architecture=config['visual_architecture'],
-        pretrained=config['pretrained']
-    ).to(device)
+    model_kwargs = {
+        'projection_dim': config['projection_dim'],
+        'visual_architecture': config['visual_architecture'],
+        'pretrained': config['pretrained']
+    }
+    if config.get('text_encoder_name'):
+        model_kwargs['text_encoder_name'] = config['text_encoder_name']
+    try:
+        model = KazClip(**model_kwargs).to(device)
+    except TypeError:
+        model_kwargs.pop('text_encoder_name', None)
+        model = KazClip(**model_kwargs).to(device)
     
     # Print model info
     model_info = model.get_model_info()
@@ -456,24 +523,29 @@ def train_model(visual_architecture: str = 'resnet50', **kwargs):
     
     # Optionally freeze encoder backbones, keep only projection layers trainable
     if config.get('freeze_encoders', True):
-        model.freeze_encoders()
+        model.freeze_encoders(
+            train_last_visual_layers=config.get('train_last_visual_layers', 2),
+            train_last_text_layers=config.get('train_last_text_layers', 0)
+        )
     else:
         print("🔥 Training all parameters (encoders not frozen)")
     
     # Create datasets
     print("📁 Loading datasets...")
     train_dataset = KazakhImageCaptionDataset(
-        json_path=config.get('train_json_path', "data/captions_train2017_kaz.json"),
+        json_path=config.get('train_json_path', "data/captions_kk_train2017.json"),
         image_dir=config.get('train_image_dir', "data/train2017"),
         split="train",
-        visual_architecture=config['visual_architecture']
+        visual_architecture=config['visual_architecture'],
+        text_model_name=config['text_encoder_name']
     )
     
     val_dataset = KazakhImageCaptionDataset(
-        json_path=config.get('val_json_path', "data/captions_val2017_kazakh.json"), 
+        json_path=config.get('val_json_path', "data/captions_kk_val2017.json"),
         image_dir=config.get('val_image_dir', "data/val2017"),
         split="val",
-        visual_architecture=config['visual_architecture']
+        visual_architecture=config['visual_architecture'],
+        text_model_name=config['text_encoder_name']
     )
     
     print(f"📊 Train dataset size: {len(train_dataset)}")
@@ -505,17 +577,19 @@ def train_model(visual_architecture: str = 'resnet50', **kwargs):
     )
     
     # Warmup + Cosine Annealing
-    warmup_steps = len(train_loader) * config['warmup_epochs']
-    total_steps = len(train_loader) * config['epochs']
-    
-    scheduler = torch.optim.lr_scheduler.LambdaLR(
-        optimizer,
-        lr_lambda=lambda step: min(1.0, step / warmup_steps) if step <= warmup_steps 
-        else 0.5 * (1 + np.cos(np.pi * (step - warmup_steps) / (total_steps - warmup_steps)))
-    )
+    warmup_steps = max(1, len(train_loader) * config['warmup_epochs'])
+    total_steps = max(warmup_steps + 1, len(train_loader) * config['epochs'])
+
+    def lr_lambda(step: int) -> float:
+        if step <= warmup_steps:
+            return float(step) / float(warmup_steps)
+        progress = (step - warmup_steps) / (total_steps - warmup_steps)
+        return 0.5 * (1 + np.cos(np.pi * progress))
+
+    scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda=lr_lambda)
     
     # Mixed precision training
-    scaler = torch.cuda.amp.GradScaler()
+    scaler = torch.cuda.amp.GradScaler(enabled=amp_enabled)
     
     # Initialize wandb
     if config.get('use_wandb', True):
@@ -562,7 +636,7 @@ def train_model(visual_architecture: str = 'resnet50', **kwargs):
             
             optimizer.zero_grad()
             
-            with torch.cuda.amp.autocast():
+            with torch.cuda.amp.autocast(enabled=amp_enabled):
                 visual_features, text_features = model(batch_images, batch_text)
                 loss = model.compute_loss(visual_features, text_features)
             
@@ -734,9 +808,9 @@ def main():
     parser = argparse.ArgumentParser(description='Train KazClip with different visual architectures')
     
     # Model architecture options
-    parser.add_argument('--visual-architecture', type=str, default='resnet50',
+    parser.add_argument('--visual-architecture', type=str, default='deit_s_16',
                        choices=get_available_architectures(),
-                       help='Visual encoder architecture to use')
+                       help='Visual encoder architecture to use (currently only deit_s_16)')
     parser.add_argument('--projection-dim', type=int, default=256,
                        help='Projection dimension for embeddings')
     parser.add_argument('--no-pretrained', action='store_true',
@@ -759,11 +833,15 @@ def main():
                        help='Early stopping patience')
     parser.add_argument('--gradient-clip-val', type=float, default=1.0,
                        help='Gradient clipping value')
+    parser.add_argument('--train-last-visual-layers', type=int, default=2,
+                       help='Number of final ViT blocks to keep trainable when freezing encoders')
+    parser.add_argument('--train-last-text-layers', type=int, default=0,
+                       help='Number of final text transformer blocks to keep trainable when freezing encoders')
     
     # Data options
-    parser.add_argument('--train-json-path', type=str, default='data/captions_train2017_kaz.json',
+    parser.add_argument('--train-json-path', type=str, default='data/captions_kk_train2017.json',
                        help='Path to training captions JSON file')
-    parser.add_argument('--val-json-path', type=str, default='data/captions_val2017_kazakh.json',
+    parser.add_argument('--val-json-path', type=str, default='data/captions_kk_val2017.json',
                        help='Path to validation captions JSON file')
     parser.add_argument('--train-image-dir', type=str, default='data/train2017',
                        help='Directory containing training images')
@@ -804,6 +882,8 @@ def main():
         'warmup_epochs': args.warmup_epochs,
         'patience': args.patience,
         'gradient_clip_val': args.gradient_clip_val,
+        'train_last_visual_layers': args.train_last_visual_layers,
+        'train_last_text_layers': args.train_last_text_layers,
         'random_state': args.random_state,
         'eval_every_n_epochs': args.eval_every_n_epochs,
         'max_checkpoints': args.max_checkpoints,
@@ -813,6 +893,7 @@ def main():
         'val_image_dir': args.val_image_dir,
         'project_name': args.project_name,
         'use_wandb': not args.no_wandb,
+        'text_encoder_name': 'xlm-roberta-base',
     }
     
     try:

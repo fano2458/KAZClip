@@ -2,61 +2,59 @@ import torch
 import torch.nn as nn
 from transformers import AutoModel, AutoTokenizer
 
+from src.projection import ProjectionHead
+
+_SUPPORTED_TEXT_MODEL = 'xlm-roberta-base'
+
 
 class TextTokenizer:
-    def __init__(self):
-        self.tokenizer = AutoTokenizer.from_pretrained("kz-transformers/kaz-roberta-conversational")
+    """Tokenizer wrapper that enforces the supported multilingual model."""
 
-    def __call__(self, x):
-        return self.tokenizer(x, return_tensors="pt", padding="max_length", max_length=64, truncation=True)
+    def __init__(self, model_name: str = _SUPPORTED_TEXT_MODEL, max_length: int = 64, **kwargs):
+        if model_name != _SUPPORTED_TEXT_MODEL:
+            raise ValueError(f"Unsupported text encoder: {model_name}. Allowed: {_SUPPORTED_TEXT_MODEL}")
+        self.tokenizer = AutoTokenizer.from_pretrained(model_name)
+        self.max_length = max_length
+
+    def __call__(self, text, **tokenizer_kwargs):
+        if isinstance(text, str):
+            text = [text]
+        max_length = tokenizer_kwargs.pop('max_length', self.max_length)
+        return self.tokenizer(
+            text,
+            return_tensors="pt",
+            padding="max_length",
+            truncation=True,
+            max_length=max_length,
+            **tokenizer_kwargs
+        )
 
 
 class TextEncoder(nn.Module):
-    def __init__(self, projection_dim=256):
-        super(TextEncoder, self).__init__()
-        self.encoder = AutoModel.from_pretrained("kz-transformers/kaz-roberta-conversational")
-        
-        # Create deeper projection head with more trainable layers
-        hidden_size = self.encoder.config.hidden_size  # Usually 768 for RoBERTa base
-        intermediate_dim1 = hidden_size // 2  # 384
-        intermediate_dim2 = max(projection_dim * 2, 512)  # Ensure reasonable intermediate size
-        
-        self.projection_head = nn.Sequential(
-            # First projection layer
-            nn.Linear(hidden_size, intermediate_dim1),
-            nn.BatchNorm1d(intermediate_dim1),
-            nn.ReLU(inplace=True),
-            nn.Dropout(0.1),
-            
-            # Second projection layer
-            nn.Linear(intermediate_dim1, intermediate_dim2),
-            nn.BatchNorm1d(intermediate_dim2),
-            nn.ReLU(inplace=True),
-            nn.Dropout(0.1),
-            
-            # Third projection layer
-            nn.Linear(intermediate_dim2, intermediate_dim2 // 2),
-            nn.BatchNorm1d(intermediate_dim2 // 2),
-            nn.ReLU(inplace=True),
-            nn.Dropout(0.1),
-            
-            # Final projection layer
-            nn.Linear(intermediate_dim2 // 2, projection_dim)
-        )
+    """XLM-RoBERTa encoder followed by a residual projection head."""
 
-    def forward(self, x):
-        out = self.encoder(**x)
-        text_features = out.pooler_output
-        projection = self.projection_head(text_features)
+    def __init__(self, projection_dim: int = 256, model_name: str = _SUPPORTED_TEXT_MODEL):
+        super().__init__()
+        if model_name != _SUPPORTED_TEXT_MODEL:
+            raise ValueError(f"Unsupported text encoder: {model_name}. Allowed: {_SUPPORTED_TEXT_MODEL}")
+        self.encoder = AutoModel.from_pretrained(model_name)
+        hidden_size = self.encoder.config.hidden_size
+        self.projection_head = ProjectionHead(hidden_size, projection_dim)
 
-        return projection
+    def forward(self, tokens):
+        outputs = self.encoder(**tokens)
+        hidden_states = outputs.last_hidden_state
+        attention_mask = tokens.get('attention_mask')
+        if attention_mask is not None:
+            pooled = self._mean_pool(hidden_states, attention_mask)
+        else:
+            pooled = hidden_states[:, 0]
+        return self.projection_head(pooled)
 
-
-if __name__ == "__main__":
-    model = TextEncoder()
-    tokenizer = AutoTokenizer.from_pretrained("kz-transformers/kz-roberta-conversational")
-    input_text = "Сіздердің ата-аналарыңыздың аты-жөні туралы ақпарат беріңіз"
-    input_ids = tokenizer(input_text, return_tensors="pt", padding="max_length", max_length=64, truncation=True)["input_ids"]
-    # with torch.no_grad():
-    #     output = model(input_ids)
-    print(input_ids.shape)
+    @staticmethod
+    def _mean_pool(hidden_states: torch.Tensor, attention_mask: torch.Tensor) -> torch.Tensor:
+        mask = attention_mask.unsqueeze(-1).type_as(hidden_states)
+        masked_states = hidden_states * mask
+        summed = masked_states.sum(dim=1)
+        counts = mask.sum(dim=1).clamp(min=1e-6)
+        return summed / counts

@@ -16,14 +16,15 @@ def load_model_from_checkpoint(checkpoint_path: str, device: torch.device) -> Ka
     checkpoint = torch.load(checkpoint_path, map_location=device)
     
     # Get config from checkpoint or use defaults
-    config = checkpoint.get('config', {
-        'projection_dim': 256,
-        'visual_architecture': 'resnet50'
-    })
+    config = checkpoint.get('config', {})
+    projection_dim = config.get('projection_dim', 512)
+    visual_arch = config.get('visual_architecture', 'deit_s_16')
+    text_encoder = config.get('text_encoder_name', 'xlm-roberta-base')
     
     model = KazClip(
-        projection_dim=config['projection_dim'],
-        visual_architecture=config.get('visual_architecture', 'resnet50'),
+        projection_dim=projection_dim,
+        visual_architecture=visual_arch,
+        text_encoder_name=text_encoder,
         pretrained=False  # Don't need pretrained for evaluation
     ).to(device)
     model.load_state_dict(checkpoint['model_state_dict'])
@@ -34,10 +35,9 @@ def load_model_from_checkpoint(checkpoint_path: str, device: torch.device) -> Ka
 def main():
     parser = argparse.ArgumentParser(description='Evaluate KazClip model')
     parser.add_argument('--checkpoint', type=str, required=True, help='Path to model checkpoint')
-    parser.add_argument('--csv-path', type=str, default='data/captions_kazakh.txt', help='Path to captions CSV')
-    parser.add_argument('--image-dir', type=str, default='data/Images', help='Path to images directory')
+    parser.add_argument('--json-path', type=str, default='data/captions_kk_val2017.json', help='Path to COCO-style captions JSON')
+    parser.add_argument('--image-dir', type=str, default='data/val2017', help='Path to images directory')
     parser.add_argument('--batch-size', type=int, default=64, help='Batch size for evaluation')
-    parser.add_argument('--split', type=str, default='val', choices=['train', 'val'], help='Dataset split to evaluate')
     parser.add_argument('--output', type=str, default='evaluation_results.json', help='Output file for results')
     
     args = parser.parse_args()
@@ -53,12 +53,10 @@ def main():
     # Create dataset
     print("Loading dataset...")
     dataset = KazakhImageCaptionDataset(
-        csv_path=args.csv_path,
-        image_dir=args.image_dir, 
-        split=args.split,
-        test_size=0.1,
-        random_state=42,
-        visual_architecture=config.get('visual_architecture', 'resnet50')
+        json_path=args.json_path,
+        image_dir=args.image_dir,
+        visual_architecture=config.get('visual_architecture', 'deit_s_16'),
+        text_model_name=config.get('text_encoder_name', 'xlm-roberta-base')
     )
     
     # Create dataloader
@@ -104,7 +102,7 @@ def main():
     # Save results
     results = {
         'checkpoint': args.checkpoint,
-        'dataset_split': args.split,
+        'dataset_path': args.json_path,
         'dataset_size': len(dataset),
         'metrics': metrics,
         'overall_score': overall_score

@@ -28,18 +28,18 @@ class KazClipInference:
         
         # Load model
         checkpoint = torch.load(checkpoint_path, map_location=device)
-        config = checkpoint.get('config', {
-            'projection_dim': 256,
-            'visual_architecture': 'resnet50'
-        })
+        config = checkpoint.get('config', {})
+        projection_dim = config.get('projection_dim', 512)
+        self.visual_architecture = config.get('visual_architecture', 'deit_s_16')
+        self.text_encoder_name = config.get('text_encoder_name', 'xlm-roberta-base')
         
-        self.visual_architecture = config.get('visual_architecture', 'resnet50')
-        self.text_tokenizer = TextTokenizer()
+        self.text_tokenizer = TextTokenizer(model_name=self.text_encoder_name)
         self.visual_processor = VisualProcessor(self.visual_architecture)
         
         self.model = KazClip(
-            projection_dim=config['projection_dim'],
+            projection_dim=projection_dim,
             visual_architecture=self.visual_architecture,
+            text_encoder_name=self.text_encoder_name,
             pretrained=False
         ).to(device)
         self.model.load_state_dict(checkpoint['model_state_dict'])
@@ -47,11 +47,16 @@ class KazClipInference:
         
         print(f"Model loaded from {checkpoint_path}")
         print(f"Visual architecture: {self.visual_architecture}")
+        print(f"Text encoder: {self.text_encoder_name}")
         if 'epoch' in checkpoint:
             print(f"Epoch: {checkpoint['epoch']}")
         if 'metrics' in checkpoint:
             metrics = checkpoint['metrics']
-            print(f"Model performance - I2T Top1: {metrics.get('i2t_top1', 'N/A'):.2f}%, T2I Top1: {metrics.get('t2i_top1', 'N/A'):.2f}%")
+            i2t = metrics.get('i2t_top1')
+            t2i = metrics.get('t2i_top1')
+            i2t_str = f"{i2t:.2f}%" if isinstance(i2t, (int, float)) else "N/A"
+            t2i_str = f"{t2i:.2f}%" if isinstance(t2i, (int, float)) else "N/A"
+            print(f"Model performance - I2T Top1: {i2t_str}, T2I Top1: {t2i_str}")
     
     def encode_text(self, texts: List[str]) -> torch.Tensor:
         """Encode text queries into embeddings."""
@@ -62,7 +67,7 @@ class KazClipInference:
                 tokens = self.text_tokenizer(text)
                 tokens = {k: v.to(self.device) for k, v in tokens.items()}
                 
-                _, text_features = self.model(None, tokens)
+                text_features = self.model.encode_text(tokens)
                 text_features = F.normalize(text_features, dim=1)
                 embeddings.append(text_features.cpu())
         
@@ -76,17 +81,9 @@ class KazClipInference:
             for image_path in tqdm(image_paths, desc="Encoding images"):
                 try:
                     image = Image.open(image_path).convert("RGB")
-                    image_tensor = self.visual_processor(image)
+                    image_tensor = self.visual_processor(image).to(self.device)
                     
-                    # Handle batch dimension
-                    if len(image_tensor.shape) == 4:
-                        image_tensor = image_tensor[0:1]  # Keep batch dimension of 1
-                    else:
-                        image_tensor = image_tensor.unsqueeze(0)
-                    
-                    image_tensor = image_tensor.to(self.device)
-                    
-                    visual_features, _ = self.model(image_tensor, None)
+                    visual_features = self.model.encode_image(image_tensor)
                     visual_features = F.normalize(visual_features, dim=1)
                     embeddings.append(visual_features.cpu())
                     
@@ -96,7 +93,7 @@ class KazClipInference:
                     if embeddings:
                         zero_embedding = torch.zeros_like(embeddings[0])
                     else:
-                        zero_embedding = torch.zeros(1, 256)  # Default dimension
+                        zero_embedding = torch.zeros(1, self.model.projection_dim)
                     embeddings.append(zero_embedding)
         
         return torch.cat(embeddings, dim=0)
@@ -152,7 +149,7 @@ def main():
     image_extensions = {'.jpg', '.jpeg', '.png', '.bmp', '.tiff'}
     image_paths = []
     
-    for filename in os.listdir(args.image_dir):
+    for filename in sorted(os.listdir(args.image_dir)):
         if any(filename.lower().endswith(ext) for ext in image_extensions):
             image_paths.append(os.path.join(args.image_dir, filename))
     
